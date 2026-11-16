@@ -138,16 +138,32 @@ ScopedAStatus RadioConfig::getPhoneCapability(int32_t serial) {
     return ScopedAStatus::ok();
 }
 
-ScopedAStatus RadioConfig::getSimSlotsStatus(int32_t serial) {
-    int cardState;
-    {
-        std::lock_guard lk(state().lock);
-        cardState = state().cardState;
-    }
+aconfig::SimSlotStatus currentSlotStatus() {
     aconfig::SimSlotStatus slot{};
-    slot.cardState = cardState;
-    slot.portInfo = {{.iccId = "", .logicalSlotId = 0, .portActive = true}};
-    if (mResp) mResp->getSimSlotsStatusResponse(ok(serial), {slot});
+    std::lock_guard lk(state().lock);
+    slot.cardState = state().cardState;
+    slot.portInfo = {{.iccId = state().iccid, .logicalSlotId = 0, .portActive = true}};
+    return slot;
+}
+
+void notifySlotStatus() {
+    auto& sv = services();
+    if (sv.config && sv.config->ind())
+        sv.config->ind()->simSlotsStatusChanged(kUnsol, {currentSlotStatus()});
+}
+
+// The framework asks this before its first GET_SIM_STATUS: ask the RIL instead of answering
+// "absent" from a state that has not been filled in yet.
+ScopedAStatus RadioConfig::getSimSlotsStatus(int32_t serial) {
+    ril(RIL_REQUEST_GET_SIM_STATUS, Payload::none(), [this, serial](RIL_Errno e, void* r, size_t len) {
+        if (e == RIL_E_SUCCESS && r && len >= sizeof(int)) {
+            // card_state is the first member of every RIL_CardStatus layout
+            std::lock_guard lk(state().lock);
+            state().cardState = *static_cast<int*>(r);
+            if (state().cardState != RIL_CARDSTATE_PRESENT) state().iccid.clear();
+        }
+        if (mResp) mResp->getSimSlotsStatusResponse(ok(serial), {currentSlotStatus()});
+    });
     return ScopedAStatus::ok();
 }
 

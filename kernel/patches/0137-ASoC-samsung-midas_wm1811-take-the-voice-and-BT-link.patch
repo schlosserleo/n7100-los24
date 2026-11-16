@@ -1,0 +1,101 @@
+From 3e69b325bedafac8408630c1147164dba46fde4d Mon Sep 17 00:00:00 2001
+From: blue898 <201240079+blue898@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 20:49:27 +0100
+Subject: [PATCH 137/146] ASoC: samsung: midas_wm1811: take the voice and BT
+ links off the I2S DAI
+
+AIF2 (modem) and AIF3 (Bluetooth) are wired straight to the codec, but
+their links used the SoC's I2S controller as the CPU DAI, shared with
+the HiFi link. That DAI's rate symmetry forced the HiFi PCM to the call
+rate (8 or 16 kHz) for as long as the voice PCM was open. Android's
+audio HAL then failed with "cannot set hw params: Invalid argument", its
+output stream went into the error state and the system stayed silent
+until a reboot: no ringtone for the next incoming call.
+
+Use the card's own "Voice call" and "Bluetooth" DAIs as the CPU side,
+with the dummy platform. No samples go through the SoC on these links:
+opening the PCM only makes the codec clock and power the interface
+(DAPM runs at prepare). The PCM core still wants buffer limits, and the
+dummy platform sets none, so the machine component gets an open callback
+that does.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ sound/soc/samsung/midas_wm1811.c | 40 ++++++++++++++++++++++++++++----
+ 1 file changed, 36 insertions(+), 4 deletions(-)
+
+diff --git a/sound/soc/samsung/midas_wm1811.c b/sound/soc/samsung/midas_wm1811.c
+index 20905161d..7d5439f87 100644
+--- a/sound/soc/samsung/midas_wm1811.c
++++ b/sound/soc/samsung/midas_wm1811.c
+@@ -573,8 +573,30 @@ static struct snd_soc_dai_driver midas_ext_dai[] = {
+ 	},
+ };
+ 
++/*
++ * The "Voice call" and "Bluetooth" PCMs carry no samples through the SoC: opening one
++ * only makes the codec clock and power the matching interface. They still need buffer
++ * limits, or the PCM core refuses the open.
++ */
++static const struct snd_pcm_hardware midas_ext_pcm_hw = {
++	.info			= SNDRV_PCM_INFO_INTERLEAVED |
++				  SNDRV_PCM_INFO_BLOCK_TRANSFER,
++	.buffer_bytes_max	= 64 * 1024,
++	.period_bytes_min	= 256,
++	.period_bytes_max	= 16 * 1024,
++	.periods_min		= 2,
++	.periods_max		= 128,
++};
++
++static int midas_ext_pcm_open(struct snd_soc_component *component,
++			      struct snd_pcm_substream *substream)
++{
++	return snd_soc_set_runtime_hwparams(substream, &midas_ext_pcm_hw);
++}
++
+ static const struct snd_soc_component_driver midas_component = {
+ 	.name	= "midas-audio",
++	.open	= midas_ext_pcm_open,
+ };
+ 
+ SND_SOC_DAILINK_DEFS(wm1811_hifi,
+@@ -582,15 +604,20 @@ SND_SOC_DAILINK_DEFS(wm1811_hifi,
+ 	DAILINK_COMP_ARRAY(COMP_CODEC(NULL, "wm8994-aif1")),
+ 	DAILINK_COMP_ARRAY(COMP_EMPTY()));
+ 
++/*
++ * AIF2 (modem) and AIF3 (Bluetooth) are wired straight to the codec; the SoC I2S
++ * controller is not part of these links. Binding them to the I2S CPU DAI made its
++ * rate symmetry force the HiFi PCM to the call rate while the voice PCM was open.
++ */
+ SND_SOC_DAILINK_DEFS(wm1811_voice,
+-	DAILINK_COMP_ARRAY(COMP_EMPTY()),
++	DAILINK_COMP_ARRAY(COMP_CPU("Voice call")),
+ 	DAILINK_COMP_ARRAY(COMP_CODEC(NULL, "wm8994-aif2")),
+-	DAILINK_COMP_ARRAY(COMP_EMPTY()));
++	DAILINK_COMP_ARRAY(COMP_PLATFORM("snd-soc-dummy")));
+ 
+ SND_SOC_DAILINK_DEFS(wm1811_bt,
+-	DAILINK_COMP_ARRAY(COMP_EMPTY()),
++	DAILINK_COMP_ARRAY(COMP_CPU("Bluetooth")),
+ 	DAILINK_COMP_ARRAY(COMP_CODEC(NULL, "wm8994-aif3")),
+-	DAILINK_COMP_ARRAY(COMP_EMPTY()));
++	DAILINK_COMP_ARRAY(COMP_PLATFORM("snd-soc-dummy")));
+ 
+ static struct snd_soc_dai_link midas_dai[] = {
+ 	{
+@@ -790,6 +817,11 @@ static int midas_probe(struct platform_device *pdev)
+ 
+ 	for_each_card_prelinks(card, i, dai_link) {
+ 		dai_link->codecs->of_node = codec_dai_node;
++		if (dai_link->cpus->dai_name) {
++			/* "Voice call"/"Bluetooth": DAIs of this machine component */
++			dai_link->cpus->of_node = dev->of_node;
++			continue;
++		}
+ 		dai_link->cpus->of_node = cpu_dai_node;
+ 		dai_link->platforms->of_node = cpu_dai_node;
+ 	}
+-- 
+2.53.0
+

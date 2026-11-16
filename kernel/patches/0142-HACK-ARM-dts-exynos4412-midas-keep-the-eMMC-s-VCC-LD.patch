@@ -1,0 +1,52 @@
+From 0d0855d814b211805dd19ccc58e7ae7e9f9f4cbb Mon Sep 17 00:00:00 2001
+From: blue898 <201240079+blue898@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 20:49:28 +0100
+Subject: [PATCH 142/146] HACK: ARM: dts: exynos4412-midas: keep the eMMC's VCC
+ (LDO22) on
+
+The MMC core switches the eMMC's VCC off in every system suspend, also
+in one that is aborted a moment later. The rail then comes back before
+it has discharged and the eMMC (VTU00M) does not come out of it:
+
+  dwmmc_exynos 12550000.mmc: Busy; trying anyway
+  mmc0: Card stuck being busy! __mmc_poll_for_busy
+  I/O error, dev mmcblk0
+
+with the phone dead until it is power-cycled (seen once, in a sleep test
+without a cable).
+
+Mark the regulator always-on. Real sleep still cuts the rail through
+the sleep state of its enable pin (gpk0-2).
+
+A workaround: the failure was not reproduced on purpose, so the
+mechanism is not proven. With it, 33 aborted suspends in a row
+(pm_test=processors) and a night without a cable were clean.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ arch/arm/boot/dts/samsung/exynos4412-midas.dtsi | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/arch/arm/boot/dts/samsung/exynos4412-midas.dtsi b/arch/arm/boot/dts/samsung/exynos4412-midas.dtsi
+index 966795063..f1f0c6c68 100644
+--- a/arch/arm/boot/dts/samsung/exynos4412-midas.dtsi
++++ b/arch/arm/boot/dts/samsung/exynos4412-midas.dtsi
+@@ -957,6 +957,15 @@ ldo22_reg: LDO22 {
+ 				regulator-min-microvolt = <2800000>;
+ 				regulator-max-microvolt = <2800000>;
+ 				maxim,ena-gpios = <&gpk0 2 GPIO_ACTIVE_HIGH>;
++				/*
++				 * eMMC VCC. Without this the MMC core switches it off in
++				 * every system suspend, also in one that is aborted a
++				 * moment later; the rail then comes back before it has
++				 * discharged and the eMMC (VTU00M) is left "stuck being
++				 * busy" until the phone is power-cycled. Real sleep still
++				 * cuts the rail through the pin's sleep state (gpk0-2).
++				 */
++				regulator-always-on;
+ 			};
+ 
+ 			ldo23_reg: LDO23 {
+-- 
+2.53.0
+

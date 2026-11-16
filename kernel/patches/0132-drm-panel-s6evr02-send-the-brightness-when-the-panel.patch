@@ -1,0 +1,40 @@
+From 0862f7177634ac70ce1ce22d6ea8123521dba705 Mon Sep 17 00:00:00 2001
+From: blue898 <201240079+blue898@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 20:49:15 +0100
+Subject: [PATCH 132/146] drm/panel: s6evr02: send the brightness when the
+ panel is enabled
+
+The panel comes out of reset with its own gamma, AID and ELVSS, and the
+backlight code only sends ours when the level changes. After the screen
+went off and on at an unchanged level (the proximity sensor or the power
+key during a call) the image stayed washed out until the next brightness
+change.
+
+Send the current level at the end of the init sequence.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/panel/panel-samsung-s6evr02.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/drivers/gpu/drm/panel/panel-samsung-s6evr02.c b/drivers/gpu/drm/panel/panel-samsung-s6evr02.c
+index 823a4d801..f1e61067a 100644
+--- a/drivers/gpu/drm/panel/panel-samsung-s6evr02.c
++++ b/drivers/gpu/drm/panel/panel-samsung-s6evr02.c
+@@ -504,6 +504,13 @@ static void s6evr02_set_sequence(struct s6evr02 *ctx)
+ 	s6evr02_set_maximum_return_packet_size(ctx, 3);
+ 	s6evr02_read_mtp_id(ctx);
+ 	s6evr02_panel_init(ctx);
++	/*
++	 * The panel comes out of reset with its own gamma, AID and ELVSS. The backlight
++	 * code only sends ours when the level changes, so after an off/on at an unchanged
++	 * level (the proximity sensor or the power key during a call) the image stayed
++	 * washed out until the next brightness change: send the current level here.
++	 */
++	s6evr02_brightness_set(ctx);
+ 	s6evr02_dcs_write_seq_static(ctx, MIPI_DCS_SET_DISPLAY_ON);
+ }
+ 
+-- 
+2.53.0
+

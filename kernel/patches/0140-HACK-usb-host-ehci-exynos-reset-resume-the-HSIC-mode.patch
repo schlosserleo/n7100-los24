@@ -1,0 +1,60 @@
+From 0e56f14b0ca03afee3cad58abd7c989077c7a3ae Mon Sep 17 00:00:00 2001
+From: blue898 <201240079+blue898@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 20:49:28 +0100
+Subject: [PATCH 140/146] HACK: usb: host: ehci-exynos: reset-resume the HSIC
+ modem after every suspend
+
+exynos_ehci_suspend() switches the PHYs off and tells the CP so. If the
+suspend is then aborted, or woken before the SoC has lost its power, the
+controller still has CF set and ehci_resume() signals a plain resume on
+the port. The CP, already detached and waiting for the attach handshake,
+never answers:
+
+  usb 1-2: port 2 resume error -110
+
+followed by a disconnect and a silent CP reset (20 to 30 s without
+network). It happened when the CP woke the phone for a signal strength
+report and Android suspended again half a second later.
+
+Take the power-loss path every time the modem is there, as Samsung's
+s5p-ehci did, so the CP always comes back by reset-resume.
+
+This does not cover everything: after an aborted suspend the link still
+disconnects and enumerates again (1 to 2 s), and a series of aborted
+suspends can still end in a CP reset.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ drivers/usb/host/ehci-exynos.c | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/usb/host/ehci-exynos.c b/drivers/usb/host/ehci-exynos.c
+index ca6882fe4..57bc8acc8 100644
+--- a/drivers/usb/host/ehci-exynos.c
++++ b/drivers/usb/host/ehci-exynos.c
+@@ -423,10 +423,21 @@ static int exynos_ehci_resume(struct device *dev)
+ 	/* DMA burst Enable */
+ 	writel(EHCI_INSNREG00_ENABLE_DMA_BURST, EHCI_INSNREG00(hcd->regs));
+ 
+-	ehci_resume(hcd, false);
+ #ifdef UGLY_HACK
++	/*
++	 * exynos_ehci_suspend() switched the PHYs off and told the CP so. If the
++	 * suspend is then aborted or woken before the SoC loses power, the
++	 * controller still has CF set and a plain resume signals the port, which
++	 * the CP (already detached, waiting for the attach handshake) never
++	 * answers: "port 2 resume error -110", disconnect, silent CP reset. Take
++	 * the power-loss path every time, as Samsung's s5p-ehci did, so the CP is
++	 * always brought back by reset-resume.
++	 */
++	ehci_resume(hcd, exynos_ehci_host_notify != NULL);
+ 	if (exynos_ehci_host_notify)
+ 		exynos_ehci_wait_for_cp(hcd);
++#else
++	ehci_resume(hcd, false);
+ #endif
+ 	return 0;
+ }
+-- 
+2.53.0
+

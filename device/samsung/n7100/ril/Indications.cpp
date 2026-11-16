@@ -143,6 +143,9 @@ void onUnsolicited(int id, const void* d, size_t len) {
                 sv.network->ind()->voiceRadioTechChanged(
                         kUnsol, static_cast<aidl_radio::RadioTechnology>(intAt(data, len, 0)));
             break;
+        case 11017:  // Samsung: RIL_UNSOL_WB_AMR_STATE, one int
+            callAudioWideband(intAt(data, len, 0) != 0);
+            break;
         default:
             LOG(DEBUG) << "unsolicited " << id << " (" << len << " bytes) dropped";
             break;

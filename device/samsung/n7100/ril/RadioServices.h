@@ -28,6 +28,7 @@ struct RilState {
     std::string operatorNumeric;  // last OPERATOR response
     int dataRat = 0;              // RIL_RadioTechnology of the last data registration
     int cardState = 0;            // RIL_CardState of the last GET_SIM_STATUS
+    std::string iccid;            // EF_ICCID of the present card (digits), read once per card
     int legacyRadioState = RADIO_STATE_UNAVAILABLE;
 };
 RilState& state();
@@ -231,6 +232,14 @@ struct Services {
     std::shared_ptr<RadioMessaging> messaging;
 };
 Services& services();
+
+// The one SIM slot as the config service reports it, and its "changed" indication
+aconfig::SimSlotStatus currentSlotStatus();
+void notifySlotStatus();
+
+// Call audio: the modem's PCM state for the codec service (see RadioVoice.cpp)
+void callAudioWideband(bool wideband);
+void callAudioPublish();
 
 // Unsolicited responses of the legacy RIL -> AIDL indications
 void onUnsolicited(int id, const void* data, size_t len);

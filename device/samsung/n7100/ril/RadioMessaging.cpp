@@ -43,17 +43,70 @@ ScopedAStatus RadioMessaging::acknowledgeLastIncomingGsmSms(int32_t serial, bool
     return ScopedAStatus::ok();
 }
 
+/*
+ * libsec-ril hands out, and takes, the service centre as the hex of its address field
+ * ("0791947101673000": length, type of address, BCD digits). Android expects the 3GPP 27.005
+ * form <sca>,<tosca> ("\"+491710760300\",145") and would otherwise put the hex string into
+ * outgoing messages as if it were a phone number.
+ */
+static bool isHex(const std::string& s) {
+    if (s.empty() || s.size() % 2) return false;
+    for (char c : s)
+        if (!isxdigit(static_cast<unsigned char>(c))) return false;
+    return true;
+}
+
+static bool isAddressField(const std::string& s) {
+    return isHex(s) && s.size() >= 4 && strtoul(s.substr(0, 2).c_str(), nullptr, 16) == s.size() / 2 - 1;
+}
+
+static std::string smscFromRil(const std::string& s) {
+    if (isHex(s) && strtoul(s.substr(0, 2).c_str(), nullptr, 16) == 0) return "";  // none stored
+    if (!isAddressField(s)) return s;
+    unsigned long toa = strtoul(s.substr(2, 2).c_str(), nullptr, 16);
+    std::string num;
+    for (size_t i = 4; i + 1 < s.size(); i += 2)
+        for (char c : {s[i + 1], s[i]})
+            if (c >= '0' && c <= '9') num.push_back(c);
+    return "\"" + std::string((toa & 0x70) == 0x10 ? "+" : "") + num + "\"," + std::to_string(toa);
+}
+
+static std::string smscToRil(const std::string& s) {
+    if (isAddressField(s)) return s;
+    std::string num;
+    bool plus = false;
+    size_t i = 0;
+    while (i < s.size() && (s[i] == '"' || s[i] == ' ')) i++;
+    if (i < s.size() && s[i] == '+') plus = true, i++;
+    for (; i < s.size() && s[i] >= '0' && s[i] <= '9'; i++) num.push_back(s[i]);
+    if (num.empty()) return s;
+    unsigned long toa = 0;
+    size_t comma = s.find(',', i);
+    if (comma != std::string::npos) toa = strtoul(s.c_str() + comma + 1, nullptr, 10);
+    if (toa == 0 || toa > 255) toa = plus ? 145 : 129;
+    char head[8];
+    snprintf(head, sizeof(head), "%02zx%02lx", 1 + (num.size() + 1) / 2, toa);
+    std::string out = head;
+    for (size_t k = 0; k < num.size(); k += 2) {
+        out.push_back(k + 1 < num.size() ? num[k + 1] : 'f');
+        out.push_back(num[k]);
+    }
+    return out;
+}
+
 ScopedAStatus RadioMessaging::getSmscAddress(int32_t serial) {
     ril(RIL_REQUEST_GET_SMSC_ADDRESS, Payload::none(), [this, serial](RIL_Errno e, void* r, size_t) {
-        if (mResp) mResp->getSmscAddressResponse(rsp(serial, e), str(static_cast<char*>(r)));
+        if (mResp)
+            mResp->getSmscAddressResponse(rsp(serial, e), smscFromRil(str(static_cast<char*>(r))));
     });
     return ScopedAStatus::ok();
 }
 
 ScopedAStatus RadioMessaging::setSmscAddress(int32_t serial, const std::string& smsc) {
-    ril(RIL_REQUEST_SET_SMSC_ADDRESS, Payload::string(smsc), [this, serial](RIL_Errno e, void*, size_t) {
-        if (mResp) mResp->setSmscAddressResponse(rsp(serial, e));
-    });
+    ril(RIL_REQUEST_SET_SMSC_ADDRESS, Payload::string(smscToRil(smsc)),
+        [this, serial](RIL_Errno e, void*, size_t) {
+            if (mResp) mResp->setSmscAddressResponse(rsp(serial, e));
+        });
     return ScopedAStatus::ok();
 }
 

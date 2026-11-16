@@ -1,0 +1,268 @@
+From 45819f7795978c63b15c99b9127a8817eb8ea3ca Mon Sep 17 00:00:00 2001
+From: blue898 <201240079+blue898@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 20:49:28 +0100
+Subject: [PATCH 145/146] drm/exynos: show the bootloader's logo until
+ userspace draws
+
+The bootloader leaves its logo on the panel, but the picture does not
+survive: about a second into the boot the display power domain goes off
+and the panel is left with a frozen, half dark image, then with nothing,
+for the half minute until Android's boot animation.
+
+If the device tree names the bootloader's framebuffer (a reserved-memory
+node "samsung,exynos-bootloader-fb" with width, height and stride of an
+XRGB8888 image), copy it into the fbdev framebuffer and set the mode as
+soon as the DRM device is bound.
+
+What the bootloader shows is not necessarily in that framebuffer (S-Boot
+keeps the battery of its charging screen there and shows the logo from
+another buffer). So early, while the bootloader's FIMD set-up is still
+live, look at which buffer the first enabled window scans out and copy
+that picture into the named framebuffer.
+
+There is still a glitch of about 0.4 s when the kernel takes over.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/exynos/exynos_drm_drv.c   |  10 ++
+ drivers/gpu/drm/exynos/exynos_drm_fbdev.c | 165 ++++++++++++++++++++++
+ drivers/gpu/drm/exynos/exynos_drm_fbdev.h |   2 +
+ 3 files changed, 177 insertions(+)
+
+diff --git a/drivers/gpu/drm/exynos/exynos_drm_drv.c b/drivers/gpu/drm/exynos/exynos_drm_drv.c
+index 9ee300868..8565ae8f6 100644
+--- a/drivers/gpu/drm/exynos/exynos_drm_drv.c
++++ b/drivers/gpu/drm/exynos/exynos_drm_drv.c
+@@ -17,6 +17,7 @@
+ #include <drm/drm_atomic.h>
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_drv.h>
++#include <drm/drm_fb_helper.h>
+ #include <drm/drm_file.h>
+ #include <drm/drm_fourcc.h>
+ #include <drm/drm_ioctl.h>
+@@ -289,6 +290,15 @@ static int exynos_drm_bind(struct device *dev)
+ 
+ 	drm_client_setup(drm, NULL);
+ 
++	/*
++	 * Nothing sets a mode before userspace does (fbcon is kept off the
++	 * display): if the bootloader's logo was copied into the fbdev
++	 * framebuffer, show it now instead of leaving the panel with whatever it
++	 * froze on when the bootloader's video stream was cut.
++	 */
++	if (exynos_drm_fbdev_has_boot_logo() && drm->fb_helper)
++		drm_fb_helper_restore_fbdev_mode_unlocked(drm->fb_helper, false);
++
+ 	return 0;
+ 
+ err_cleanup_poll:
+diff --git a/drivers/gpu/drm/exynos/exynos_drm_fbdev.c b/drivers/gpu/drm/exynos/exynos_drm_fbdev.c
+index 8641c9e84..92c03ccd9 100644
+--- a/drivers/gpu/drm/exynos/exynos_drm_fbdev.c
++++ b/drivers/gpu/drm/exynos/exynos_drm_fbdev.c
+@@ -9,6 +9,10 @@
+  */
+ 
+ #include <linux/fb.h>
++#include <linux/io.h>
++#include <linux/of.h>
++#include <linux/of_address.h>
++#include <video/samsung_fimd.h>
+ 
+ #include <drm/drm_crtc_helper.h>
+ #include <drm/drm_drv.h>
+@@ -56,6 +60,163 @@ static const struct fb_ops exynos_drm_fb_ops = {
+ static const struct drm_fb_helper_funcs exynos_drm_fbdev_helper_funcs = {
+ };
+ 
++static bool exynos_drm_fbdev_boot_logo;
++
++/* True once the bootloader's picture is in the fbdev framebuffer, waiting to be shown */
++bool exynos_drm_fbdev_has_boot_logo(void)
++{
++	return exynos_drm_fbdev_boot_logo;
++}
++
++/*
++ * The bootloader leaves its logo on the panel, but the picture does not survive the
++ * hand-over: the display power domain goes off as soon as the drivers have probed and
++ * the panel is left with a frozen, half dark image until something sets a mode. If the
++ * device tree names the bootloader's framebuffer ("samsung,exynos-bootloader-fb", a
++ * reserved-memory node with width, height and stride of an XRGB8888 image), copy it
++ * into ours; exynos_drm_bind() then sets the mode right away.
++ */
++static void exynos_drm_fbdev_copy_boot_logo(void *dst, u32 fourcc, u32 width,
++					    u32 height, u32 pitch)
++{
++	u32 src_width, src_height, src_stride, y;
++	struct device_node *np;
++	struct resource res;
++	void *src;
++
++	np = of_find_compatible_node(NULL, NULL, "samsung,exynos-bootloader-fb");
++	if (!np)
++		return;
++
++	if (fourcc != DRM_FORMAT_XRGB8888 ||
++	    of_address_to_resource(np, 0, &res) ||
++	    of_property_read_u32(np, "width", &src_width) ||
++	    of_property_read_u32(np, "height", &src_height) ||
++	    of_property_read_u32(np, "stride", &src_stride) ||
++	    src_width > width || src_height > height || src_stride < src_width * 4 ||
++	    (u64)src_stride * src_height > resource_size(&res))
++		goto out;
++
++	src = memremap(res.start, src_stride * src_height, MEMREMAP_WB);
++	if (!src)
++		goto out;
++
++	for (y = 0; y < src_height; y++)
++		memcpy(dst + y * pitch, src + y * src_stride, src_width * 4);
++
++	memunmap(src);
++	exynos_drm_fbdev_boot_logo = true;
++out:
++	of_node_put(np);
++}
++
++#ifndef MODULE
++/*
++ * What the bootloader has on the panel is not necessarily in the framebuffer the device
++ * tree names (S-Boot keeps a second picture there, the battery of its charging screen).
++ * Long before the display drivers probe, while the bootloader's FIMD set-up is still
++ * running, look at which buffer the first enabled window scans out and normalise that
++ * picture into the named framebuffer, as XRGB8888 at its place on the screen.
++ */
++static int __init exynos_drm_fbdev_grab_bootloader_image(void)
++{
++	u32 width, height, stride, vidcon0, wincon = 0, buf = 0, size = 0;
++	u32 osd_a = 0, osd_b = 0, x0, y0, w, h, src_stride, bpp, x, y;
++	struct device_node *fb_np, *fimd_np;
++	const u8 *src, *src_end;
++	struct resource res;
++	void __iomem *regs;
++	int win;
++	u8 *dst;
++
++	fb_np = of_find_compatible_node(NULL, NULL, "samsung,exynos-bootloader-fb");
++	if (!fb_np)
++		return 0;
++	fimd_np = of_find_compatible_node(NULL, NULL, "samsung,exynos4210-fimd");
++	if (!fimd_np)
++		goto out_fb;
++
++	if (of_address_to_resource(fb_np, 0, &res) ||
++	    of_property_read_u32(fb_np, "width", &width) ||
++	    of_property_read_u32(fb_np, "height", &height) ||
++	    of_property_read_u32(fb_np, "stride", &stride) ||
++	    stride < width * 4 || (u64)stride * height > resource_size(&res))
++		goto out;
++
++	regs = of_iomap(fimd_np, 0);
++	if (!regs)
++		goto out;
++	vidcon0 = readl(regs + VIDCON0);
++	for (win = 0; win < 5; win++) {
++		wincon = readl(regs + WINCON(win));
++		if (wincon & WINCONx_ENWIN)
++			break;
++	}
++	if (win < 5) {
++		buf = readl(regs + VIDW_BUF_START(win));
++		size = readl(regs + VIDW_BUF_SIZE(win));
++		osd_a = readl(regs + VIDOSD_BASE + win * 16);
++		osd_b = readl(regs + VIDOSD_BASE + win * 16 + 4);
++	}
++	iounmap(regs);
++
++	pr_info("exynos-drm: bootloader display: VIDCON0 %#x, window %d: WINCON %#x buffer %#x size %#x OSD %#x %#x\n",
++		vidcon0, win, wincon, buf, size, osd_a, osd_b);
++	if (win == 5 || !(vidcon0 & VIDCON0_ENVID))
++		goto out;
++
++	x0 = (osd_a & VIDOSDxA_TOPLEFT_X_MASK) >> VIDOSDxA_TOPLEFT_X_SHIFT;
++	y0 = osd_a & VIDOSDxA_TOPLEFT_Y_MASK;
++	w = ((osd_b & VIDOSDxB_BOTRIGHT_X_MASK) >> VIDOSDxB_BOTRIGHT_X_SHIFT) - x0 + 1;
++	h = (osd_b & VIDOSDxB_BOTRIGHT_Y_MASK) - y0 + 1;
++	src_stride = (size & VIDW_BUF_SIZE_PAGEWIDTH_MASK) +
++		     ((size & VIDW_BUF_SIZE_OFFSET_MASK) >> VIDW_BUF_SIZE_OFFSET_SHIFT);
++	if ((wincon & WINCON0_BPPMODE_MASK) == WINCON0_BPPMODE_16BPP_565)
++		bpp = 2;
++	else if ((wincon & WINCON0_BPPMODE_MASK) >= WINCON0_BPPMODE_24BPP_888)
++		bpp = 4;
++	else
++		goto out;
++
++	if (!w || !h || x0 + w > width || y0 + h > height || src_stride < w * bpp)
++		goto out;
++	if (buf == res.start && bpp == 4 && w == width && h == height &&
++	    src_stride == stride)
++		goto out;			/* it is there already */
++
++	src = phys_to_virt(buf);
++	src_end = src + (size_t)src_stride * h;
++	dst = phys_to_virt(res.start);
++	if (!virt_addr_valid(src) || !virt_addr_valid(src_end - 1) ||
++	    (src < dst + resource_size(&res) && src_end > dst))
++		goto out;			/* not plain lowmem, or overlapping */
++
++	memset(dst, 0, (size_t)stride * height);
++	for (y = 0; y < h; y++) {
++		u32 *d = (u32 *)(dst + (size_t)(y0 + y) * stride) + x0;
++		const u8 *line = src + (size_t)y * src_stride;
++
++		if (bpp == 4) {
++			memcpy(d, line, w * 4);
++			continue;
++		}
++		for (x = 0; x < w; x++) {
++			u16 p = ((const u16 *)line)[x];
++
++			d[x] = ((p & 0xf800) << 8) | ((p & 0x07e0) << 5) |
++			       ((p & 0x001f) << 3);
++		}
++	}
++	pr_info("exynos-drm: bootloader picture %ux%u at %u,%u kept\n", w, h, x0, y0);
++out:
++	of_node_put(fimd_np);
++out_fb:
++	of_node_put(fb_np);
++	return 0;
++}
++core_initcall(exynos_drm_fbdev_grab_bootloader_image);
++#endif
++
+ int exynos_drm_fbdev_driver_fbdev_probe(struct drm_fb_helper *helper,
+ 					struct drm_fb_helper_surface_size *sizes)
+ {
+@@ -116,6 +277,10 @@ int exynos_drm_fbdev_driver_fbdev_probe(struct drm_fb_helper *helper,
+ 
+ 	drm_fb_helper_fill_info(info, helper, sizes);
+ 
++	exynos_drm_fbdev_copy_boot_logo(exynos_gem->kvaddr, fourcc,
++					sizes->surface_width, sizes->surface_height,
++					pitch);
++
+ 	info->flags |= FBINFO_VIRTFB;
+ 	info->screen_buffer = exynos_gem->kvaddr;
+ 	info->screen_size = obj->size;
+diff --git a/drivers/gpu/drm/exynos/exynos_drm_fbdev.h b/drivers/gpu/drm/exynos/exynos_drm_fbdev.h
+index 02a9201ab..02180d6ac 100644
+--- a/drivers/gpu/drm/exynos/exynos_drm_fbdev.h
++++ b/drivers/gpu/drm/exynos/exynos_drm_fbdev.h
+@@ -17,9 +17,11 @@ struct drm_fb_helper_surface_size;
+ #if defined(CONFIG_DRM_FBDEV_EMULATION)
+ int exynos_drm_fbdev_driver_fbdev_probe(struct drm_fb_helper *fbh,
+ 					struct drm_fb_helper_surface_size *sizes);
++bool exynos_drm_fbdev_has_boot_logo(void);
+ #define EXYNOS_DRM_FBDEV_DRIVER_OPS \
+ 	.fbdev_probe = exynos_drm_fbdev_driver_fbdev_probe
+ #else
++static inline bool exynos_drm_fbdev_has_boot_logo(void) { return false; }
+ #define EXYNOS_DRM_FBDEV_DRIVER_OPS \
+ 	.fbdev_probe = NULL
+ #endif
+-- 
+2.53.0
+

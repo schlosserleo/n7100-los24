@@ -57,15 +57,62 @@ static asim::CardStatus toCardStatus(void* r, size_t len) {
     return cs;
 }
 
+// EF_ICCID (2FE2 under the MF): ten bytes of BCD with swapped nibbles, padded with F
+static std::string iccidFromEf(const char* hex) {
+    std::string out;
+    if (!hex) return out;
+    size_t n = strlen(hex) & ~static_cast<size_t>(1);
+    for (size_t i = 0; i < n; i += 2) {
+        for (char c : {hex[i + 1], hex[i]}) {
+            if (c < '0' || c > '9') return out;
+            out.push_back(c);
+        }
+    }
+    return out;
+}
+
+// The legacy card status has no ICCID. Android's telephony (subscriptions) takes it from the
+// AIDL CardStatus and creates no subscription without it, so read EF_ICCID once per card.
 ScopedAStatus RadioSim::getIccCardStatus(int32_t serial) {
     ril(RIL_REQUEST_GET_SIM_STATUS, Payload::none(), [this, serial](RIL_Errno e, void* r, size_t len) {
         asim::CardStatus cs{};
         if (e == RIL_E_SUCCESS && r) cs = toCardStatus(r, len);
+        bool present = cs.cardState == RIL_CARDSTATE_PRESENT;
+        bool changed;
         {
             std::lock_guard lk(state().lock);
+            changed = state().cardState != cs.cardState;
             state().cardState = cs.cardState;
+            if (!present) state().iccid.clear();
+            cs.iccid = state().iccid;
         }
-        if (mResp) mResp->getIccCardStatusResponse(rsp(serial, e), cs);
+        if (!present || !cs.iccid.empty()) {
+            if (mResp) mResp->getIccCardStatusResponse(rsp(serial, e), cs);
+            if (changed) notifySlotStatus();
+            return;
+        }
+        auto p = std::make_unique<Payload>();
+        auto* s = p->make<RIL_SIM_IO_v6>();
+        s->command = 0xb0;  // READ BINARY
+        s->fileid = 0x2fe2;
+        s->path = p->keep("3F00");
+        s->p3 = 10;
+        ril(RIL_REQUEST_SIM_IO, std::move(p),
+            [this, serial, e, cs](RIL_Errno e2, void* r2, size_t len2) mutable {
+                std::string iccid;
+                if (e2 == RIL_E_SUCCESS && r2 && len2 >= sizeof(RIL_SIM_IO_Response)) {
+                    auto* rr = static_cast<RIL_SIM_IO_Response*>(r2);
+                    if (rr->sw1 == 0x90 || rr->sw1 == 0x91) iccid = iccidFromEf(rr->simResponse);
+                }
+                LOG(INFO) << "EF_ICCID: e=" << e2 << ", " << iccid.size() << " digits";
+                {
+                    std::lock_guard lk(state().lock);
+                    state().iccid = iccid;
+                }
+                cs.iccid = iccid;
+                if (mResp) mResp->getIccCardStatusResponse(rsp(serial, e), cs);
+                notifySlotStatus();
+            });
     });
     return ScopedAStatus::ok();
 }

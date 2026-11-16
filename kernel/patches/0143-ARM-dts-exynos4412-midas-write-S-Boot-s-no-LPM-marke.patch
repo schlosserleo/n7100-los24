@@ -1,0 +1,61 @@
+From bea4015be7b847565c25474494ebe1cda843fafb Mon Sep 17 00:00:00 2001
+From: blue898 <201240079+blue898@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 20:49:28 +0100
+Subject: [PATCH 143/146] ARM: dts: exynos4412-midas: write S-Boot's no-LPM
+ marker where it reads it
+
+S-Boot takes a restart for a restart only if INFORM2 holds 0x12345678.
+INFORM2 is at offset 0x0808 of the PMU, not 0xF008, and the handler that
+writes it had the default priority, the same as the SoC's own
+syscon-reboot, which is registered first: the reset happened before the
+marker was written.
+
+So with a USB cable attached S-Boot took every reboot for "powered on by
+the charger": it drew its battery screen over the logo and asked for the
+charger mode (androidboot.mode=charger next to the device tree's
+androidboot.mode=normal).
+
+Use the right offset and a priority above the reset handler's. The price
+is that handler's one second wait on every restart.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ arch/arm/boot/dts/samsung/exynos4412-midas.dtsi | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm/boot/dts/samsung/exynos4412-midas.dtsi b/arch/arm/boot/dts/samsung/exynos4412-midas.dtsi
+index f1f0c6c68..7ae1ecbe4 100644
+--- a/arch/arm/boot/dts/samsung/exynos4412-midas.dtsi
++++ b/arch/arm/boot/dts/samsung/exynos4412-midas.dtsi
+@@ -1109,8 +1109,13 @@ &pmu_system_controller {
+ 	assigned-clocks = <&pmu_system_controller 0>;
+ 	assigned-clock-parents = <&clock CLK_XUSBXTI>;
+ 
+-	/* S-Boot 4.0 */
+-	#define S5P_INFORM2		0xF008
++	/*
++	 * S-Boot 4.0. INFORM2 is at 0x0808: with 0x12345678 there S-Boot treats a
++	 * restart as a restart. Written to 0xF008 it never arrived, so with a USB
++	 * cable attached S-Boot took every reboot for "powered on by the charger",
++	 * drew its battery screen over the logo and asked for the charger mode.
++	 */
++	#define S5P_INFORM2		0x0808
+ 	#define S5P_INFORM3		0x080C
+ 	#define BOOT_MODE_PREFIX	0x12345670
+ 	#define BOOT_NORMAL		(BOOT_MODE_PREFIX | 0)
+@@ -1121,6 +1126,12 @@ no-lpm-mode {
+ 		compatible = "syscon-reboot";
+ 		offset = <S5P_INFORM2>;
+ 		value = <0x12345678>;
++		/*
++		 * Before the SoC's own syscon-reboot (192, registered first), or
++		 * the reset happens and this is never written. The price is the
++		 * handler's one second wait on every restart.
++		 */
++		priority = <200>;
+ 	};
+ 
+ 	reboot-mode {
+-- 
+2.53.0
+

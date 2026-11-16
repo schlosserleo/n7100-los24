@@ -33,6 +33,8 @@ size=$(($(stat -c %s arch/arm/boot/Image) + $(stat -c %s arch/arm/boot/zImage)))
 
 rm -rf "$P/kernel" "$P/modules" && mkdir -p "$P/kernel" "$P/modules"
 cat arch/arm/boot/zImage arch/arm/boot/dts/samsung/exynos4412-n7100-ea8061.dtb > "$P/kernel/zImage-dtb"
+# the same kernel for the Note II's other panel (not in the flash zip yet)
+cat arch/arm/boot/zImage arch/arm/boot/dts/samsung/exynos4412-n7100-s6evr02.dtb > "$P/kernel/zImage-dtb-s6evr02"
 MR=$(mktemp -d)
 $M INSTALL_MOD_PATH="$MR" INSTALL_MOD_STRIP=1 modules_install > /dev/null
 find "$MR/lib/modules" -name '*.ko' -exec cp {} "$P/modules/" \;

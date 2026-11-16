@@ -1,0 +1,78 @@
+From 696db0c9f1e61f70983ff6cd52bef0b1ba1baa11 Mon Sep 17 00:00:00 2001
+From: blue898 <201240079+blue898@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 20:49:27 +0100
+Subject: [PATCH 139/146] power: supply: max77693: report the type of the cable
+
+The supply's type was a fixed "Mains". Android's healthd tells "USB"
+from "AC" by the type alone, so a PC port was shown as a wall charger.
+
+Give each charger its own power_supply_desc and set the type from the
+extcon cable: USB for SDP, USB_CDP for CDP, Mains for everything else.
+
+Checked with a PC port only; no wall charger was at hand.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ drivers/power/supply/max77693_charger.c | 17 ++++++++++++++++-
+ 1 file changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/power/supply/max77693_charger.c b/drivers/power/supply/max77693_charger.c
+index cef23f615..ab7fa8378 100644
+--- a/drivers/power/supply/max77693_charger.c
++++ b/drivers/power/supply/max77693_charger.c
+@@ -23,6 +23,8 @@ struct max77693_charger {
+ 	struct device		*dev;
+ 	struct max77693_dev	*max77693;
+ 	struct power_supply	*charger;
++	/* our own copy: .type follows the cable (USB port or charger) */
++	struct power_supply_desc psy_desc;
+ 
+ 	u32 constant_volt;
+ 	u32 min_system_volt;
+@@ -715,6 +717,7 @@ static void max77693_charger_extcon_work(struct work_struct *work)
+ 	struct max77693_charger *chg = container_of(work, struct max77693_charger,
+ 						  cable.work);
+ 	struct extcon_dev *edev = chg->cable.edev;
++	enum power_supply_type type = POWER_SUPPLY_TYPE_MAINS;
+ 	bool set_charging, set_otg;
+ 	unsigned int input_current;
+ 	int connector, state;
+@@ -741,6 +744,16 @@ static void max77693_charger_extcon_work(struct work_struct *work)
+ 		set_charging = true;
+ 		set_otg = false;
+ 
++		/*
++		 * Userspace (Android's healthd) tells "USB" from "AC" by the
++		 * supply type alone; a fixed "Mains" showed a PC port as a
++		 * wall charger.
++		 */
++		if (connector == EXTCON_CHG_USB_SDP)
++			type = POWER_SUPPLY_TYPE_USB;
++		else if (connector == EXTCON_CHG_USB_CDP)
++			type = POWER_SUPPLY_TYPE_USB_CDP;
++
+ 		dev_info(chg->dev, "slow charging. connector type: %d\n",
+ 			 connector);
+ 		break;
+@@ -790,6 +803,7 @@ static void max77693_charger_extcon_work(struct work_struct *work)
+ 		dev_err(chg->dev, "failed to set OTG (%d)\n", ret);
+ 
+ out:
++	chg->psy_desc.type = type;
+ 	power_supply_changed(chg->charger);
+ }
+ 
+@@ -955,8 +969,9 @@ static int max77693_charger_probe(struct platform_device *pdev)
+ 	psy_cfg.drv_data = chg;
+ 	psy_cfg.fwnode = dev_fwnode(&pdev->dev);
+ 
++	chg->psy_desc = max77693_charger_desc;
+ 	chg->charger = devm_power_supply_register(&pdev->dev,
+-						  &max77693_charger_desc,
++						  &chg->psy_desc,
+ 						  &psy_cfg);
+ 	if (IS_ERR(chg->charger))
+ 		return dev_err_probe(&pdev->dev, PTR_ERR(chg->charger),
+-- 
+2.53.0
+

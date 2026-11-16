@@ -1,0 +1,46 @@
+From 19bfa1d7fc1c8ca1f8a9da0d595384a6a47acf6b Mon Sep 17 00:00:00 2001
+From: blue898 <201240079+blue898@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 20:49:27 +0100
+Subject: [PATCH 133/146] drm/panel: s6evr02: HSA/HBP packets, no auto vertical
+ mode
+
+The same as for the EA8061 on this board: in auto vertical mode the DSIM
+can latch the line start in the middle of a line at enable, and the
+whole image comes up shifted sideways until the display is turned off
+and on again. On the S6EVR02 this showed after the screen was turned off
+and on during a call.
+
+Send the HSA and HBP blanking packets and drop
+MIPI_DSI_MODE_VIDEO_AUTO_VERT, as Samsung's vendor kernel does.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/panel/panel-samsung-s6evr02.c | 11 ++++++++---
+ 1 file changed, 8 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/gpu/drm/panel/panel-samsung-s6evr02.c b/drivers/gpu/drm/panel/panel-samsung-s6evr02.c
+index f1e61067a..450c63b60 100644
+--- a/drivers/gpu/drm/panel/panel-samsung-s6evr02.c
++++ b/drivers/gpu/drm/panel/panel-samsung-s6evr02.c
+@@ -694,10 +694,15 @@ static int s6evr02_probe(struct mipi_dsi_device *dsi)
+ 
+ 	dsi->lanes = 4;
+ 	dsi->format = MIPI_DSI_FMT_RGB888;
++	/*
++	 * As for the EA8061 on the same board: send HSA/HBP blanking packets and no DSIM
++	 * auto vertical mode, like Samsung's vendor kernel. In auto vertical mode the
++	 * DSIM can latch the line start mid-line at enable, and the whole image comes up
++	 * shifted sideways until the display is turned off and on again (seen on the
++	 * S6EVR02 after the screen was turned off and on during a call).
++	 */
+ 	dsi->mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_BURST
+-		| MIPI_DSI_MODE_VIDEO_NO_HFP | MIPI_DSI_MODE_VIDEO_NO_HBP
+-		| MIPI_DSI_MODE_VIDEO_NO_HSA | MIPI_DSI_MODE_NO_EOT_PACKET
+-		| MIPI_DSI_MODE_VIDEO_AUTO_VERT;
++		| MIPI_DSI_MODE_VIDEO_NO_HFP | MIPI_DSI_MODE_NO_EOT_PACKET;
+ 
+ 	ret = s6evr02_parse_dt(ctx);
+ 	if (ret < 0)
+-- 
+2.53.0
+

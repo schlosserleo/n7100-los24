@@ -1,0 +1,108 @@
+From 8dde37f480c15a702e65753b4220d5b06e02331c Mon Sep 17 00:00:00 2001
+From: blue898 <201240079+blue898@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 20:49:27 +0100
+Subject: [PATCH 136/146] ASoC: samsung: midas_wm1811: clock AIF2 from the
+ modem for voice calls
+
+The "WM1811 Voice" link had no ops, so opening its PCM left AIF2 without
+a clock and a call had no audio in either direction.
+
+AIF2 carries the XMM6262's voice PCM. The modem provides BCLK and LRCLK
+(256 kHz at 8 kHz, 512 kHz for AMR-WB at 16 kHz); the codec is the
+consumer and derives AIF2CLK from that BCLK with FLL2, as the vendor
+kernel did, falling back to MCLK1 if the modem's clock is not there yet.
+
+When the last stream of the call is closed, FLL2 is switched off. AIF2
+must not be parked on MCLK2 instead: the codec takes the faster of
+AIF1CLK and AIF2CLK as CLK_SYS, and with AIF2 on MCLK2 it chose the
+stopped AIF2CLK for every later AIF1 stream, which then played and
+recorded silence until the next reboot.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ sound/soc/samsung/midas_wm1811.c | 62 ++++++++++++++++++++++++++++++++
+ 1 file changed, 62 insertions(+)
+
+diff --git a/sound/soc/samsung/midas_wm1811.c b/sound/soc/samsung/midas_wm1811.c
+index d43af5069..20905161d 100644
+--- a/sound/soc/samsung/midas_wm1811.c
++++ b/sound/soc/samsung/midas_wm1811.c
+@@ -256,6 +256,67 @@ static const struct snd_soc_ops midas_aif1_ops = {
+ 	.hw_params = midas_aif1_hw_params,
+ };
+ 
++/*
++ * AIF2 carries the modem's (XMM6262) voice PCM. The modem provides BCLK and LRCLK
++ * (256 kHz at 8 kHz, 512 kHz at 16 kHz), the codec is the consumer and derives AIF2CLK
++ * from that BCLK with FLL2, as the vendor kernel did. If the modem's clock is not there
++ * yet the FLL is fed from MCLK1 instead.
++ */
++static int midas_aif2_hw_params(struct snd_pcm_substream *substream,
++				struct snd_pcm_hw_params *params)
++{
++	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
++	struct snd_soc_dai *aif2_dai = snd_soc_rtd_to_codec(rtd, 0);
++	unsigned int rate = params_rate(params);
++	unsigned int bclk = rate == 16000 ? 512000 : 256000;
++	int ret;
++
++	if (rate != 8000 && rate != 16000)
++		return -EINVAL;
++
++	ret = snd_soc_dai_set_fmt(aif2_dai, SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_NB_NF |
++				  SND_SOC_DAIFMT_CBC_CFC);
++	if (ret < 0)
++		return ret;
++
++	ret = snd_soc_dai_set_pll(aif2_dai, WM8994_FLL2, WM8994_FLL_SRC_BCLK, bclk,
++				  rate * 256);
++	if (ret < 0) {
++		dev_warn(rtd->card->dev, "FLL2 from the modem BCLK failed (%d), using MCLK1\n", ret);
++		ret = snd_soc_dai_set_pll(aif2_dai, WM8994_FLL2, WM8994_FLL_SRC_MCLK1,
++					  MCLK1_RATE, rate * 256);
++		if (ret < 0)
++			return ret;
++	}
++
++	return snd_soc_dai_set_sysclk(aif2_dai, WM8994_SYSCLK_FLL2, rate * 256,
++				      SND_SOC_CLOCK_IN);
++}
++
++static int midas_aif2_hw_free(struct snd_pcm_substream *substream)
++{
++	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
++	struct snd_soc_dai *aif2_dai = snd_soc_rtd_to_codec(rtd, 0);
++
++	/*
++	 * The last stream of the call: FLL2 off, which leaves AIF2CLK at 0 Hz in the
++	 * codec's bookkeeping. Do not move AIF2 to MCLK2 instead: the codec picks the
++	 * faster of AIF1CLK and AIF2CLK as CLK_SYS, and with AIF2 parked on MCLK2 it
++	 * chose the (stopped) AIF2CLK for every later AIF1 stream, which then played
++	 * and recorded silence. If the FLL is still feeding CLK_SYS at this point the
++	 * codec refuses (-EBUSY) and it stays on at its 2 or 4 MHz, still below AIF1's.
++	 */
++	if (snd_soc_dai_active(aif2_dai) > 1)
++		return 0;
++	snd_soc_dai_set_pll(aif2_dai, WM8994_FLL2, 0, 0, 0);
++	return 0;
++}
++
++static const struct snd_soc_ops midas_aif2_ops = {
++	.hw_params = midas_aif2_hw_params,
++	.hw_free = midas_aif2_hw_free,
++};
++
+ /*
+  * We only have a single external speaker, so mix stereo data
+  * to a single mono stream.
+@@ -542,6 +603,7 @@ static struct snd_soc_dai_link midas_dai[] = {
+ 	}, {
+ 		.name = "WM1811 Voice",
+ 		.stream_name = "Voice call",
++		.ops = &midas_aif2_ops,
+ 		.ignore_suspend = 1,
+ 		SND_SOC_DAILINK_REG(wm1811_voice),
+ 	}, {
+-- 
+2.53.0
+

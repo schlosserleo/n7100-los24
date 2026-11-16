@@ -97,8 +97,18 @@ ScopedAStatus RadioData::deactivateDataCall(int32_t serial, int32_t cid,
     ril(RIL_REQUEST_DEACTIVATE_DATA_CALL,
         Payload::strings({std::to_string(cid),
                           reason == adata::DataRequestReason::SHUTDOWN ? "1" : "0"}),
-        [this, serial](RIL_Errno e, void*, size_t) {
+        [this, serial, cid](RIL_Errno e, void*, size_t) {
             if (mResp) mResp->deactivateDataCallResponse(rsp(serial, e));
+            if (e != RIL_E_SUCCESS) return;
+            // libsec-ril reports no DATA_CALL_LIST_CHANGED for a deactivation it was asked for,
+            // and Android's data network stays "disconnecting" (blocking a new setup for five
+            // minutes) until the list no longer has the call: report the list ourselves.
+            ril(RIL_REQUEST_DATA_CALL_LIST, Payload::none(),
+                [this, cid](RIL_Errno, void* r, size_t len) {
+                    auto list = toDataCallList(r, len);
+                    std::erase_if(list, [cid](const auto& dc) { return dc.cid == cid; });
+                    if (mInd) mInd->dataCallListChanged(kUnsol, list);
+                });
         });
     return ScopedAStatus::ok();
 }

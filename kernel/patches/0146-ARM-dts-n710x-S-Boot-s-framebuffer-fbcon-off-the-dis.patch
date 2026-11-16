@@ -1,0 +1,54 @@
+From e624b1ebddae67b8857ee2aed294a3e0e25d6002 Mon Sep 17 00:00:00 2001
+From: blue898 <201240079+blue898@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 20:49:29 +0100
+Subject: [PATCH 146/146] ARM: dts: n710x: S-Boot's framebuffer, fbcon off the
+ display
+
+Reserve S-Boot's framebuffer (it passes s3cfb.bootloaderfb=0x5ec00000)
+and describe it for exynos-drm, which keeps the logo on the screen with
+it. fbcon=map:1 keeps the console off the display, or it would clear the
+logo when it takes the framebuffer over.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ arch/arm/boot/dts/samsung/exynos4412-n710x.dtsi | 17 ++++++++++++++++-
+ 1 file changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm/boot/dts/samsung/exynos4412-n710x.dtsi b/arch/arm/boot/dts/samsung/exynos4412-n710x.dtsi
+index 332ebc11f..29ab93ac1 100644
+--- a/arch/arm/boot/dts/samsung/exynos4412-n710x.dtsi
++++ b/arch/arm/boot/dts/samsung/exynos4412-n710x.dtsi
+@@ -23,6 +23,21 @@ ramoops@46000000 {
+ 			console-size = <0x80000>;
+ 			pmsg-size = <0x80000>;
+ 		};
++
++		/*
++		 * S-Boot's framebuffer with its logo (it passes
++		 * s3cfb.bootloaderfb=0x5ec00000). The picture on the panel is lost
++		 * about a second into the boot, when the display power domain is
++		 * switched off under it; exynos-drm copies it from here into its
++		 * own framebuffer and shows it again until Android draws.
++		 */
++		framebuffer@5ec00000 {
++			compatible = "samsung,exynos-bootloader-fb";
++			reg = <0x5ec00000 0x400000>;
++			width = <720>;
++			height = <1280>;
++			stride = <2880>;
++		};
+ 	};
+ 
+ 	/* bootargs are passed in by bootloader */
+@@ -286,7 +301,7 @@ &touchkey_reg {
+  * Android instead. The console goes to the debug UART (JIG), not the display.
+  */
+ &{/chosen} {
+-	bootargs = "console=ttySAC2,115200 androidboot.mode=normal panic=10 s3c2410_wdt.tmr_atboot=1 printk.devkmsg=on sysctl.net.core.bpf_jit_enable=1 androidboot.init_fatal_reboot_target=recovery androidboot.hardware=n7100 androidboot.boot_devices=soc/12550000.mmc firmware_class.path=/vendor/firmware";
++	bootargs = "console=ttySAC2,115200 androidboot.mode=normal panic=10 s3c2410_wdt.tmr_atboot=1 printk.devkmsg=on sysctl.net.core.bpf_jit_enable=1 androidboot.init_fatal_reboot_target=recovery androidboot.hardware=n7100 androidboot.boot_devices=soc/12550000.mmc firmware_class.path=/vendor/firmware fbcon=map:1";
+ };
+ 
+ /*
+-- 
+2.53.0
+

@@ -1,0 +1,45 @@
+From 64695e8df3f035548d083539aa91274ac38526d9 Mon Sep 17 00:00:00 2001
+From: blue898 <201240079+blue898@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 20:49:27 +0100
+Subject: [PATCH 138/146] Input: max77693-haptic: stop at 61/64 of the PWM
+ period
+
+At magnitudes of about 240 of 255 and above (Android's ringtone
+vibration runs at full strength) the duty cycle came out at 100 %.
+pwm-samsung then writes TCMPB = 0xffffffff and the output is a constant
+level. The MAX77693 takes the LRA's drive frequency from the edges of
+the external PWM: without edges the motor only hums. Lower magnitudes
+vibrated normally at 201 Hz.
+
+Scale the duty cycle to 61/64 of the period at full magnitude, 97.7 %,
+which is what Samsung's vendor driver uses (37050 of 37904 ns).
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ drivers/input/misc/max77693-haptic.c | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/input/misc/max77693-haptic.c b/drivers/input/misc/max77693-haptic.c
+index 5d45680d7..357d9fdcc 100644
+--- a/drivers/input/misc/max77693-haptic.c
++++ b/drivers/input/misc/max77693-haptic.c
+@@ -257,8 +257,14 @@ static int max77693_haptic_play_effect(struct input_dev *dev, void *data,
+ 	 */
+ 	pwm_get_args(haptic->pwm_dev, &pargs);
+ 	period_mag_multi = (u64)pargs.period * haptic->magnitude;
+-	haptic->pwm_duty = (unsigned int)(period_mag_multi >>
+-						MAX_MAGNITUDE_SHIFT);
++	/*
++	 * Stop at 61/64 of the period, a duty cycle of 97.7 % at full magnitude like
++	 * Samsung's vendor driver (37050 of 37904 ns). The MAX77693 takes the LRA's
++	 * drive frequency from the edges of the external PWM: at 100 % there are none
++	 * left and the motor only hums.
++	 */
++	haptic->pwm_duty = (unsigned int)((period_mag_multi * 61) >>
++						(MAX_MAGNITUDE_SHIFT + 6));
+ 
+ 	schedule_work(&haptic->work);
+ 
+-- 
+2.53.0
+

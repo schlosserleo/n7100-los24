@@ -9,19 +9,20 @@ written for this port.
 
 | | |
 |---|---|
-| Display, brightness, auto-brightness | works with the EA8061 panel. The other Note II panel, the S6EVR02, isn't supported yet: its device tree isn't in the boot image, so the screen stays black (the flash zip stops when TWRP reports that panel; check with `dmesg \| grep 'panel driver'` in TWRP) |
+| Display, brightness, auto-brightness | works with both Note II panels, each with its own device tree. The flash zip carries the EA8061's only and stops when TWRP reports the S6EVR02 (check with `dmesg \| grep 'panel driver'` in TWRP). For the S6EVR02 (kernel patches 0132-0134) `tools/build-kernel.sh` writes a second kernel image, `prebuilt/kernel/zImage-dtb-s6evr02`; a boot image with it has to be made and flashed by hand for now |
 | GPU | works: Mali-400 MP4 with Mesa lima (OpenGL ES 2), drm_hwcomposer, minigbm |
 | Touchscreen, S Pen, touch keys | work |
-| Audio | works (WM1811: speaker, headphones, microphone; capture runs at the playback rate of 44.1 kHz) |
+| Audio | works (WM1811: speaker, headphones, microphone; capture runs at the playback rate of 44.1 kHz); for calls see Modem |
 | Wi-Fi, Bluetooth | work (BCM4334); Wi-Fi stays connected in deep sleep and wakes the phone for traffic to it (the stock firmware has no WoWLAN: kernel patches 0121 and 0124 do it with packet filters) |
-| Modem | XMM6262 boots, baseband and IMEI are reported; calls, SMS and mobile data are untested (no SIM was at hand). In deep sleep the HSIC port loses its power; the modem attaches again on wake-up (kernel patch 0128), but every few minutes of sleep it still needs a reset (about 10 s offline) |
+| Modem | XMM6262 boots, baseband and IMEI are reported. With a SIM (tested on UMTS, one operator): calls, SMS and mobile data work. Call audio is only half in the tree: the kernel's voice PCM and the radio HAL's sound requests to the modem are (kernel patches 0136 and 0137), the service that runs that PCM and sets the WM1811 mixer during a call is not yet. In deep sleep the HSIC port loses its power and the modem attaches again on wake-up (kernel patches 0128 and 0140); calls, SMS and alarms wake the phone. A suspend that is aborted still makes the modem link disconnect and enumerate again (1 to 2 s), and a series of them can end in a modem reset (20 s to 2 min offline). Untested: MMS, tethering, a long standby; call hold is refused by the test network |
 | GPS | the BCM4752 runs and reports NMEA; a fix outdoors is not verified yet |
 | Sensors | work: accelerometer, gyroscope, magnetometer, barometer, light, proximity |
 | Rear camera | preview, photos up to 2304x1296 and video (software H.264 encoder: about 11 fps at 960x720 through CameraX); continuous autofocus and tap-to-focus (kernel patches 0119 and 0120) |
 | Flashlight, camera flash | the flash LED as a torch (quick settings tile, 8 brightness levels); camera apps get it as the torch and as the flash for photos (a continuous light at torch current, no strobe) |
 | Front camera | preview, photos and video up to 1280x720 (16:9, fixed focus), through the FIMC-IS ISP with the stock firmware (kernel patches 0107-0112, Martin Jücker's FIMC-IS fixes); colours are warm under room light (`device/samsung/n7100/camera/README.txt`) |
-| Charging, battery, standby | work, with deep sleep; the fuel gauge measures the voltage only (battery level, no current or charge counter); a cable plugged into the switched-off phone boots Android (no charger UI) |
+| Charging, battery, standby | work, with deep sleep; the fuel gauge measures the voltage only (battery level, no current or charge counter); a PC port is reported as USB (kernel patch 0139; a wall charger is untested since); a cable plugged into the switched-off phone boots Android (no charger UI), a reboot with a cable attached goes straight back to Android (kernel patch 0143) |
 | Notification LED | works: notifications (with the screen off, as LineageOS does it) and the battery state, in colour; the LED blinks by itself, also in deep sleep |
+| Vibration | works, with the amplitude Android asks for (kernel patch 0138: at full strength the PWM was a constant level and the motor didn't move) |
 | USB | adb, file transfer (MTP/PTP over FunctionFS) and the USB settings (kernel patch 0106 gives Android its gadget state); the phone stays awake while a computer uses it (kernel patch 0118) |
 | Screen mirroring | scrcpy works (video and audio over adb) |
 | USB OTG | implemented (role switch through the MAX77693 MUIC, 5 V boost), untested |
@@ -32,6 +33,10 @@ written for this port.
 
 CPU at 1.6 GHz (Prime operating points), GPU at 533 MHz, schedutil, a power HAL that raises
 CPU/GPU/memory bus floors on touch and app launches, 1 GB of zram swap (lz4).
+
+The bootloader's logo stays on the screen until the boot animation (kernel patches 0145 and
+0146). exynos-drm can keep a reserve of cleared display buffers for reuse (kernel patch 0144,
+`/sys/module/exynosdrm/parameters/gem_pool`, off by default; nothing sets it yet).
 
 The display controller (FIMD) composes the screen from hardware planes but can't scale them, so
 the wallpaper is kept at the screen's height: a 1440x1280 crop of LineageOS' default, no zoom
@@ -76,6 +81,7 @@ the `armv7-unknown-linux-musleabihf` target for n7100tool.
 tools/extract-blobs.sh 21.0-20250120-HTML6405-n7100.zip <stock system>
 
 # 2. Kernel: Linux 7.3.1 + kernel/patches, into device/samsung/n7100/prebuilt
+#    (kernel/zImage-dtb for the EA8061 panel, kernel/zImage-dtb-s6evr02 for the S6EVR02)
 git clone -b v7.3.1 --depth 1 https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
 tools/build-kernel.sh linux
 

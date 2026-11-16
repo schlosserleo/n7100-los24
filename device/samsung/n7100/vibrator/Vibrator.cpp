@@ -61,12 +61,13 @@ class Vibrator : public BnVibrator {
     ScopedAStatus off() override {
         std::lock_guard lock(mutex_);
         generation_++;
+        until_ = {};
         send(0);
         return ScopedAStatus::ok();
     }
 
     ScopedAStatus on(int32_t timeoutMs, const std::shared_ptr<IVibratorCallback>& cb) override {
-        return start(timeoutMs, cb);
+        return start(timeoutMs, cb, magnitude_);
     }
 
     ScopedAStatus perform(Effect effect, EffectStrength strength,
@@ -82,7 +83,9 @@ class Vibrator : public BnVibrator {
         if (strength == EffectStrength::LIGHT) ms = ms * 2 / 3;
         if (strength == EffectStrength::STRONG) ms = ms * 3 / 2;
         *ret = ms;
-        return start(ms, cb);
+        // Predefined effects carry their own strength (in their length); the amplitude left
+        // over from the previous vibration must not leak into them.
+        return start(ms, cb, 0xffff);
     }
 
     ScopedAStatus getSupportedEffects(std::vector<Effect>* ret) override {
@@ -96,6 +99,12 @@ class Vibrator : public BnVibrator {
         }
         std::lock_guard lock(mutex_);
         magnitude_ = static_cast<uint16_t>(amplitude * 0xffff);
+        // The framework calls on() first and setAmplitude() right after it, so the new
+        // strength belongs to the vibration that is already running: upload the effect again
+        // (ff-memless carries on with the new magnitude) for the time that is left.
+        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                until_ - std::chrono::steady_clock::now()).count();
+        if (left > 0) upload(static_cast<int32_t>(left), magnitude_);
         return ScopedAStatus::ok();
     }
 
@@ -120,21 +129,25 @@ class Vibrator : public BnVibrator {
     ScopedAStatus alwaysOnDisable(int32_t) override { return unsupported(); }
 
   private:
-    // Upload the rumble effect with the given length and start (value 1) or stop (0) it.
-    // Called with mutex_ held.
-    bool send(int value, int32_t ms = 0) {
-        if (value) {
-            ff_effect effect = {};
-            effect.type = FF_RUMBLE;
-            effect.id = effect_id_;
-            effect.u.rumble.strong_magnitude = magnitude_;
-            effect.replay.length = static_cast<uint16_t>(std::min(ms, 0xffff));
-            if (ioctl(fd_, EVIOCSFF, &effect) < 0) {
-                PLOG(ERROR) << "EVIOCSFF";
-                return false;
-            }
-            effect_id_ = effect.id;
+    // Upload the rumble effect with the given length and magnitude. Called with mutex_ held.
+    bool upload(int32_t ms, uint16_t magnitude) {
+        ff_effect effect = {};
+        effect.type = FF_RUMBLE;
+        effect.id = effect_id_;
+        effect.u.rumble.strong_magnitude = magnitude;
+        effect.replay.length = static_cast<uint16_t>(std::min(ms, 0xffff));
+        if (ioctl(fd_, EVIOCSFF, &effect) < 0) {
+            PLOG(ERROR) << "EVIOCSFF";
+            return false;
         }
+        effect_id_ = effect.id;
+        return true;
+    }
+
+    // Start (value 1, after uploading the effect) or stop (0) the rumble effect.
+    // Called with mutex_ held.
+    bool send(int value, int32_t ms = 0, uint16_t magnitude = 0) {
+        if (value && !upload(ms, magnitude)) return false;
         if (effect_id_ < 0) return true;
         input_event event = {.type = EV_FF, .code = static_cast<uint16_t>(effect_id_), .value = value};
         if (write(fd_, &event, sizeof(event)) != sizeof(event)) {
@@ -144,12 +157,16 @@ class Vibrator : public BnVibrator {
         return true;
     }
 
-    ScopedAStatus start(int32_t ms, const std::shared_ptr<IVibratorCallback>& cb) {
+    ScopedAStatus start(int32_t ms, const std::shared_ptr<IVibratorCallback>& cb,
+                        uint16_t magnitude) {
         uint64_t generation;
         {
             std::lock_guard lock(mutex_);
             generation = ++generation_;
-            if (!send(1, ms)) return ScopedAStatus::fromExceptionCode(EX_SERVICE_SPECIFIC);
+            if (!send(1, ms, magnitude)) {
+                return ScopedAStatus::fromExceptionCode(EX_SERVICE_SPECIFIC);
+            }
+            until_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
         }
         if (cb) {
             std::thread([this, ms, cb, generation] {
@@ -168,6 +185,7 @@ class Vibrator : public BnVibrator {
     std::mutex mutex_;
     int effect_id_ = -1;
     uint16_t magnitude_ = 0xffff;
+    std::chrono::steady_clock::time_point until_{};  // end of the vibration in progress
     uint64_t generation_ = 0;
 };
 

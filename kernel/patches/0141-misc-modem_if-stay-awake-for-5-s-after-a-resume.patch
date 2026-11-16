@@ -1,0 +1,65 @@
+From d234b2f0ff7b4c4b7006b27ddb9b6064de12c682 Mon Sep 17 00:00:00 2001
+From: blue898 <201240079+blue898@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 20:49:28 +0100
+Subject: [PATCH 141/146] misc: modem_if: stay awake for 5 s after a resume
+
+Android suspended again 0.5 s after a CP wake-up that carried a single
+notification. The CP then woke the host in the middle of that suspend:
+the link was lost (silent CP reset), and the eMMC, caught while busy,
+was left "stuck being busy" until the phone was power-cycled.
+
+Hold a wakelock ("resume_hold") for 5 s after every resume and after
+every aborted suspend.
+
+With this, 18 of 18 suspends in a test without a cable went through
+without a CP reset or an eMMC error.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ drivers/misc/modem_if/modem_link_device_hsic.c | 10 ++++++++++
+ drivers/misc/modem_if/modem_link_device_hsic.h |  1 +
+ 2 files changed, 11 insertions(+)
+
+diff --git a/drivers/misc/modem_if/modem_link_device_hsic.c b/drivers/misc/modem_if/modem_link_device_hsic.c
+index d1c9b9de3..30b5fcf9f 100755
+--- a/drivers/misc/modem_if/modem_link_device_hsic.c
++++ b/drivers/misc/modem_if/modem_link_device_hsic.c
+@@ -1013,6 +1013,15 @@ static int link_pm_notifier_event(struct notifier_block *this,
+ 	case PM_POST_RESTORE:
+ #endif
+ 		pm_data->dpm_suspending = false;
++		/*
++		 * Keep the system up for a few seconds after every resume and
++		 * after every aborted suspend. Android suspended again 0.5 s
++		 * after a CP wakeup that carried a single notification; the CP
++		 * then woke the host in the middle of that suspend, the link was
++		 * lost (silent CP reset) and the eMMC, caught while busy, stayed
++		 * "stuck being busy" until the phone was power-cycled.
++		 */
++		wake_lock_timeout(&pm_data->resume_wake, msecs_to_jiffies(5000));
+ 		if (gpio_get_value(pm_data->gpio_link_hostwake)
+ 			== HOSTWAKE_TRIGLEVEL) {
+ 			queue_delayed_work(pm_data->wq, &pm_data->link_pm_work,
+@@ -1541,6 +1550,7 @@ static int usb_link_pm_init(struct usb_link_device *usb_ld, void *data)
+ 	wake_lock_init(&pm_data->boot_wake, WAKE_LOCK_SUSPEND, "boot_hsic");
+ 	wake_lock_init(&pm_data->rpm_wake, WAKE_LOCK_SUSPEND, "rpm_hsic");
+ 	wake_lock_init(&pm_data->tx_async_wake, WAKE_LOCK_SUSPEND, "tx_hsic");
++	wake_lock_init(&pm_data->resume_wake, WAKE_LOCK_SUSPEND, "resume_hold");
+ 
+ #if defined(CONFIG_SLP)
+ 	device_init_wakeup(pm_data->miscdev.this_device, true);
+diff --git a/drivers/misc/modem_if/modem_link_device_hsic.h b/drivers/misc/modem_if/modem_link_device_hsic.h
+index fb8d894c4..579032ef1 100755
+--- a/drivers/misc/modem_if/modem_link_device_hsic.h
++++ b/drivers/misc/modem_if/modem_link_device_hsic.h
+@@ -97,6 +97,7 @@ struct link_pm_data {
+ 	struct wake_lock boot_wake;
+ 	struct wake_lock rpm_wake;
+ 	struct wake_lock tx_async_wake;
++	struct wake_lock resume_wake;
+ 	struct notifier_block pm_notifier;
+ 	bool dpm_suspending;
+ 
+-- 
+2.53.0
+

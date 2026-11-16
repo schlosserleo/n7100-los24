@@ -1,0 +1,75 @@
+From 138fba8cb8015dbed661bde89da5033f3eab1b77 Mon Sep 17 00:00:00 2001
+From: blue898 <201240079+blue898@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 20:49:27 +0100
+Subject: [PATCH 134/146] drm/panel: s6evr02: repeat the init sequence when it
+ fails
+
+Right after a system resume a DSI transfer of the init sequence can time
+out. Seen once, 3 s after an incoming call had woken the phone:
+
+  exynos-dsi 11c80000.dsi: xfer timed out
+  panel-samsung-s6evr02 11c80000.dsi.0: error -110 writing dcs seq
+
+DRM does not try again: the panel stayed dark while the phone rang, with
+Android convinced the screen was on, until the user switched it off and
+on with the power key.
+
+Power-cycle the panel and repeat the sequence, up to three times.
+
+The time-out has not come back since, so the retry path itself has only
+been reviewed, not exercised.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/panel/panel-samsung-s6evr02.c | 33 ++++++++++++-------
+ 1 file changed, 22 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/gpu/drm/panel/panel-samsung-s6evr02.c b/drivers/gpu/drm/panel/panel-samsung-s6evr02.c
+index 450c63b60..fa2970755 100644
+--- a/drivers/gpu/drm/panel/panel-samsung-s6evr02.c
++++ b/drivers/gpu/drm/panel/panel-samsung-s6evr02.c
+@@ -561,19 +561,30 @@ static int s6evr02_unprepare(struct drm_panel *panel)
+ static int s6evr02_prepare(struct drm_panel *panel)
+ {
+ 	struct s6evr02 *ctx = panel_to_s6evr02(panel);
+-	int ret;
+-
+-	ret = s6evr02_power_on(ctx);
+-	if (ret < 0)
+-		return ret;
+-
+-	s6evr02_set_sequence(ctx);
+-	ret = ctx->error;
++	int ret, try;
+ 
+-	if (ret < 0)
++	/*
++	 * Right after a system resume a DSI transfer of the init sequence can time out
++	 * ("xfer timed out", seen 3 s after an incoming call woke the phone). DRM does not
++	 * try again: the panel stayed dark, with Android convinced the screen was on, until
++	 * the user switched it off and on. Power-cycle the panel and repeat the sequence.
++	 */
++	for (try = 1; try <= 3; try++) {
++		ret = s6evr02_power_on(ctx);
++		if (ret < 0)
++			return ret;
++
++		s6evr02_set_sequence(ctx);
++		ret = ctx->error;
++		if (ret >= 0) {
++			set_bit(S6EVR02_STATE_BIT_ENABLED, &ctx->state);
++			return ret;
++		}
++
++		dev_warn(ctx->dev, "panel init failed (%d), attempt %d of 3\n", ret, try);
+ 		s6evr02_unprepare(panel);
+-	else
+-		set_bit(S6EVR02_STATE_BIT_ENABLED, &ctx->state);
++		msleep(20);
++	}
+ 
+ 	return ret;
+ }
+-- 
+2.53.0
+

@@ -36,6 +36,7 @@ int main() {
         LOG(ERROR) << "vendor RIL failed to start";
     }
 
+    callAudioPublish();
     auto& sv = services();
     sv.config = publish<RadioConfig>("default");
     sv.modem = publish<RadioModem>("slot1");

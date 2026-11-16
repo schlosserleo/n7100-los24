@@ -1,5 +1,11 @@
 #include "RadioServices.h"
 
+#include <fcntl.h>
+#include <unistd.h>
+
+#include <cstdio>
+#include <thread>
+
 namespace android::hardware::radio::n7100 {
 
 void RadioVoice::voidRequest(int32_t serial, int req, std::unique_ptr<Payload> p,
@@ -33,10 +39,107 @@ static std::vector<avoice::Call> toCalls(void* r, size_t len) {
     return calls;
 }
 
+/*
+ * The modem's side of call audio. On LineageOS 21 the audio HAL sent these through
+ * libsecril-client as RIL_REQUEST_OEM_HOOK_RAW (function 0x08 = sound, sub-function, 16 bit
+ * length, parameters); the payloads below are the ones recorded there for a handset call.
+ * Without them the modem keeps its PCM interface silent. The codec side (WM1811 AIF2) is
+ * set up outside this service.
+ */
+static void oemSound(std::initializer_list<uint8_t> bytes) {
+    struct Raw {
+        uint8_t b[8];
+    };
+    auto p = std::make_unique<Payload>();
+    auto* raw = p->make<Raw>();
+    std::copy(bytes.begin(), bytes.end(), raw->b);
+    p->len = bytes.size();
+    ril(RIL_REQUEST_OEM_HOOK_RAW, std::move(p), [](RIL_Errno e, void*, size_t) {
+        if (e != RIL_E_SUCCESS) LOG(WARNING) << "call audio: OEM sound request failed: " << e;
+    });
+}
+
+/*
+ * What the codec has to do is left in a file for the n7100-voice service, which sets up the
+ * WM1811 (it can reach the sound card, this service cannot): "off", or the sample rate of the
+ * modem's PCM, 16000 while the call uses AMR-WB and 8000 otherwise.
+ */
+static std::atomic<bool> gCallAudio{false};
+static std::atomic<bool> gWideband{false};
+
+void callAudioPublish() {
+    const char* state = !gCallAudio ? "off\n" : gWideband ? "16000\n" : "8000\n";
+    int fd = open("/data/vendor/ril/n7100_call_audio", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) {
+        LOG(WARNING) << "call audio: state file: " << strerror(errno);
+        return;
+    }
+    if (write(fd, state, strlen(state)) < 0) LOG(WARNING) << "call audio: state file write failed";
+    close(fd);
+}
+
+void callAudioWideband(bool wideband) {
+    if (gWideband.exchange(wideband) != wideband) {
+        LOG(INFO) << "call audio: " << (wideband ? "AMR-WB (16 kHz)" : "narrowband (8 kHz)");
+        if (gCallAudio) callAudioPublish();
+    }
+}
+
+/*
+ * The modem tunes its echo canceller and gains for the audio path it is told (handset or
+ * speaker). The codec service knows which one the call screen selected and leaves it in
+ * /data/vendor/ril/n7100_call_route; follow that file for as long as the call lasts.
+ */
+static std::atomic<int> gRouteWatch{0};
+
+static void watchCallRoute(int generation) {
+    std::string last = "earpiece";  // what the start sequence selected
+    while (gCallAudio && gRouteWatch == generation) {
+        char buf[16] = {};
+        if (FILE* f = fopen("/data/vendor/ril/n7100_call_route", "re")) {
+            if (!fgets(buf, sizeof(buf), f)) buf[0] = 0;
+            fclose(f);
+        }
+        std::string route = buf;
+        while (!route.empty() && (route.back() == '\n' || route.back() == ' ')) route.pop_back();
+        if ((route == "speaker" || route == "earpiece") && route != last) {
+            oemSound({0x08, 0x05, 0x00, 0x06, static_cast<uint8_t>(route == "speaker" ? 0x06 : 0x01), 0xd1});
+            LOG(INFO) << "call audio: modem path " << route;
+            last = route;
+        }
+        usleep(300 * 1000);
+    }
+}
+
+static void updateCallAudio(bool inCall) {
+    if (gCallAudio.exchange(inCall) == inCall) return;
+    if (inCall) {
+        oemSound({0x08, 0x0d, 0x00, 0x06, 0x00, 0x01});  // two-microphone processing on
+        oemSound({0x08, 0x0b, 0x00, 0x05, 0x00});        // microphone not muted
+        oemSound({0x08, 0x05, 0x00, 0x06, 0x01, 0xd1});  // audio path: handset
+        oemSound({0x08, 0x0a, 0x00, 0x05, 0x01});        // PCM clock on
+        oemSound({0x08, 0x03, 0x00, 0x06, 0x01, 0x03});  // voice volume 3 of 5
+    } else {
+        oemSound({0x08, 0x0a, 0x00, 0x05, 0x00});        // PCM clock off
+        oemSound({0x08, 0x0d, 0x00, 0x06, 0x00, 0x00});
+    }
+    callAudioPublish();
+    int generation = ++gRouteWatch;
+    if (inCall) std::thread(watchCallRoute, generation).detach();
+    LOG(INFO) << "call audio " << (inCall ? "on" : "off");
+}
+
 ScopedAStatus RadioVoice::getCurrentCalls(int32_t serial) {
     ril(RIL_REQUEST_GET_CURRENT_CALLS, Payload::none(),
         [this, serial](RIL_Errno e, void* r, size_t len) {
-            if (mResp) mResp->getCurrentCallsResponse(rsp(serial, e), toCalls(r, len));
+            auto calls = toCalls(r, len);
+            if (e == RIL_E_SUCCESS) {
+                // active, holding, dialing or alerting: the call has (or is about to have) audio
+                bool audio = false;
+                for (const auto& c : calls) audio |= c.state >= 0 && c.state <= 3;
+                updateCallAudio(audio);
+            }
+            if (mResp) mResp->getCurrentCallsResponse(rsp(serial, e), calls);
         });
     return ScopedAStatus::ok();
 }
